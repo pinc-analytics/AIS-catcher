@@ -20,6 +20,7 @@
 #include "NMEA.h"
 #include "JSONAIS.h"
 #include "Helper.h"
+#include "JSONBuilder.h"
 
 IO::OutputMessage *commm_feed = nullptr;
 
@@ -32,8 +33,8 @@ void SSEStreamer::Receive(const JSON::JSON *data, int len, TAG &tag)
 
 		if (!m->NMEA.empty())
 		{
-			std::string nmea_array = "[";
-			bool first = true;
+			JSON::JSONBuilder nmeaArray;
+			nmeaArray.startArray();
 
 			for (const auto &s : m->NMEA)
 			{
@@ -61,30 +62,34 @@ void SSEStreamer::Receive(const JSON::JSON *data, int len, TAG &tag)
 					}
 				}
 
-				if (!first)
-					nmea_array += ",";
-				nmea_array += "\"" + nmea + "\"";
-				first = false;
+				nmeaArray.value(nmea);
 			}
-			nmea_array += "]";
+			nmeaArray.endArray();
 
-			std::string shipname_str;
-			std::string shipname_escaped(tag.shipname);
-			JSON::StringBuilder::stringify(shipname_escaped, shipname_str);
+			JSON::JSONBuilder json;
+			json.start();
+			json.add("mmsi", m->mmsi());
+			json.add("timestamp", (long long)now);
+			json.addString("channel", std::string(1, m->getChannel()));
+			json.add("type", m->type());
+			json.addString("shipname", tag.shipname);
+			json.key("nmea");
+			json.valueRaw(nmeaArray.take());
+			json.end();
 
-			std::string json = "{\"mmsi\":" + std::to_string(m->mmsi()) +
-							   ",\"timestamp\":" + std::to_string(now) +
-							   ",\"channel\":\"" + m->getChannel() +
-							   "\",\"type\":" + std::to_string(m->type()) +
-							   ",\"shipname\":" + shipname_str +
-							   ",\"nmea\":" + nmea_array + "}";
-			server->sendSSE(1, "nmea", json);
+			server->sendSSE(1, "nmea", json.str());
 		}
 
 		if (tag.lat != 0 && tag.lon != 0)
 		{
-			std::string json = "{\"mmsi\":" + std::to_string(m->mmsi()) + ",\"channel\":\"" + m->getChannel() + "\",\"lat\":" + std::to_string(tag.lat) + ",\"lon\":" + std::to_string(tag.lon) + "}";
-			server->sendSSE(2, "nmea", json);
+			JSON::JSONBuilder json;
+			json.start();
+			json.add("mmsi", m->mmsi());
+			json.addString("channel", std::string(1, m->getChannel()));
+			json.add("lat", tag.lat);
+			json.add("lon", tag.lon);
+			json.end();
+			server->sendSSE(2, "nmea", json.str());
 		}
 	}
 }
@@ -632,37 +637,51 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 	else if (r == "/api/stat.json" || r == "/stat.json")
 	{
 
-		std::string content;
+		JSON::JSONBuilder json;
+		json.start();
 
-		content += "{\"total\":" + counter.toJSON() + ",";
-		content += "\"session\":" + counter_session.toJSON() + ",";
-		content += "\"last_day\":" + hist_day.lastStatToJSON() + ",";
-		content += "\"last_hour\":" + hist_hour.lastStatToJSON() + ",";
-		content += "\"last_minute\":" + hist_minute.lastStatToJSON() + ",";
-		content += "\"tcp_clients\":" + std::to_string(numberOfClients()) + ",";
-		content += "\"sharing\":" + std::string(commm_feed ? "true" : "false") + ",";
+		json.key("total");
+		json.valueRaw(counter.toJSON());
+		json.key("session");
+		json.valueRaw(counter_session.toJSON());
+		json.key("last_day");
+		json.valueRaw(hist_day.lastStatToJSON());
+		json.key("last_hour");
+		json.valueRaw(hist_hour.lastStatToJSON());
+		json.key("last_minute");
+		json.valueRaw(hist_minute.lastStatToJSON());
+		json.add("tcp_clients", numberOfClients());
+		json.addRaw("sharing", commm_feed ? "true" : "false");
+
 		if (ships.getShareLatLon() && ships.getLat() != LAT_UNDEFINED && ships.getLon() != LON_UNDEFINED)
-			content += "\"sharing_link\":\"https://www.aiscatcher.org/?&zoom=10&lat=" + std::to_string(ships.getLat()) + "&lon=" + std::to_string(ships.getLon()) + "\",";
+		{
+			std::string link = "https://www.aiscatcher.org/?&zoom=10&lat=" + std::to_string(ships.getLat()) + "&lon=" + std::to_string(ships.getLon());
+			json.addString("sharing_link", link);
+		}
 		else
-			content += "\"sharing_link\":\"https://www.aiscatcher.org\",";
+			json.addString("sharing_link", "https://www.aiscatcher.org");
 
-		content += "\"station\":" + station + ",";
-		content += "\"station_link\":" + station_link + ",";
-		content += "\"sample_rate\":\"" + sample_rate + "\",";
-		content += "\"msg_rate\":" + std::to_string(hist_second.getAverage()) + ",";
-		content += "\"vessel_count\":" + std::to_string(ships.getCount()) + ",";
-		content += "\"vessel_max\":" + std::to_string(ships.getMaxCount()) + ",";
-		content += "\"product\":\"" + product + "\",";
-		content += "\"vendor\":\"" + vendor + "\",";
-		content += "\"serial\":\"" + serial + "\",";
-		content += "\"model\":\"" + model + "\",";
-		content += "\"build_date\":\"" + std::string(__DATE__) + "\",";
-		content += "\"build_version\":\"" + std::string(VERSION) + "\",";
-		content += "\"build_describe\":\"" + std::string(VERSION_DESCRIBE) + "\",";
-		content += "\"run_time\":\"" + std::to_string((long int)time(nullptr) - (long int)time_start) + "\",";
-		content += "\"memory\":" + std::to_string(Util::Helper::getMemoryConsumption()) + ",";
-		content += "\"os\":" + os + ",";
-		content += "\"hardware\":" + hardware + ",";
+		json.key("station");
+		json.valueRaw(station);
+		json.key("station_link");
+		json.valueRaw(station_link);
+		json.addString("sample_rate", sample_rate);
+		json.add("msg_rate", hist_second.getAverage());
+		json.add("vessel_count", ships.getCount());
+		json.add("vessel_max", ships.getMaxCount());
+		json.addString("product", product);
+		json.addString("vendor", vendor);
+		json.addString("serial", serial);
+		json.addString("model", model);
+		json.addString("build_date", __DATE__);
+		json.addString("build_version", VERSION);
+		json.addString("build_describe", VERSION_DESCRIBE);
+		json.addString("run_time", std::to_string((long int)time(nullptr) - (long int)time_start));
+		json.add("memory", Util::Helper::getMemoryConsumption());
+		json.key("os");
+		json.valueRaw(os);
+		json.key("hardware");
+		json.valueRaw(hardware);
 
 		std::string unit;
 		const uint64_t GB = 1000000000;
@@ -683,9 +702,11 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 		int d1 = norm / 10;
 		int d2 = norm % 10;
 
-		content += "\"received\":\"" + std::to_string(d1) + "." + std::to_string(d2) + unit + "\"}";
+		std::string received = std::to_string(d1) + "." + std::to_string(d2) + unit;
+		json.addString("received", received);
+		json.end();
 
-		Response(c, "application/json", content, use_zlib & gzip);
+		Response(c, "application/json", json.str(), use_zlib & gzip);
 	}
 	else if (r == "/api/ships.json" || r == "/ships.json")
 	{
@@ -751,7 +772,8 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 	{
 		std::stringstream ss(a);
 		std::string mmsi_str;
-		std::string content = "{";
+		JSON::JSONBuilder json;
+		json.start();
 		int count = 0;
 		const int MAX_MMSI_COUNT = 100; // Limit number of MMSIs to prevent DoS
 
@@ -768,9 +790,9 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 				int mmsi = std::stoi(mmsi_str);
 				if (mmsi >= 1 && mmsi <= 999999999)
 				{
-					if (content.length() > 1)
-						content += ",";
-					content += "\"" + std::to_string(mmsi) + "\":" + ships.getPathJSON(mmsi);
+					std::string mmsiKey = std::to_string(mmsi);
+					json.key(mmsiKey);
+					json.valueRaw(ships.getPathJSON(mmsi));
 				}
 			}
 			catch (const std::invalid_argument &)
@@ -782,8 +804,8 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 				Error() << "Server - path MMSI out of range: " << mmsi_str;
 			}
 		}
-		content += "}";
-		Response(c, "application/json", content, use_zlib & gzip);
+		json.end();
+		Response(c, "application/json", json.str(), use_zlib & gzip);
 	}
 	else if (r == "/api/allpath.json")
 	{
@@ -902,18 +924,19 @@ void WebViewer::Request(IO::TCPServerConnection &c, const std::string &response,
 	else if (r == "/api/history_full.json")
 	{
 
-		std::string content = "{";
-		content += "\"second\":";
-		content += hist_second.toJSON();
-		content += ",\"minute\":";
-		content += hist_minute.toJSON();
-		content += ",\"hour\":";
-		content += hist_hour.toJSON();
-		content += ",\"day\":";
-		content += hist_day.toJSON();
-		content += "}\n\n";
+		JSON::JSONBuilder json;
+		json.start();
+		json.key("second");
+		json.valueRaw(hist_second.toJSON());
+		json.key("minute");
+		json.valueRaw(hist_minute.toJSON());
+		json.key("hour");
+		json.valueRaw(hist_hour.toJSON());
+		json.key("day");
+		json.valueRaw(hist_day.toJSON());
+		json.end();
 
-		Response(c, "application/json", content, use_zlib & gzip);
+		Response(c, "application/json", json.str() + "\n\n", use_zlib & gzip);
 	}
 	else if (r.substr(0, 6) == "/tiles")
 	{
