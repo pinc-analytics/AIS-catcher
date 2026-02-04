@@ -1,46 +1,25 @@
-/*
-	Copyright(c) 2021-2026 jvde.github@gmail.com
-
-	This program is free software: you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation, either version 3 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 #pragma once
 
 #include <string>
 #include <cstdio>
-#include <cstring> 
-#include <algorithm> 
+#include <cstring>
+#include <algorithm>
 #include <type_traits>
 
 namespace JSON {
 
 class JSONBuilder {
     std::string buf;
-    size_t cursor;     
+    size_t cursor;
     bool need_comma;
 
-    // Geometric growth to minimize allocations
-    inline void ensure(size_t len) {
+    void ensure(size_t len) {
         if (cursor + len >= buf.size()) {
-            // Double capacity or ensure enough for len, whichever is larger
-            size_t new_cap = std::max<size_t>(buf.size() * 2, cursor + len + 32);
-            buf.resize(new_cap);
+            buf.resize(std::max(buf.size() * 2, cursor + len + 64));
         }
     }
 
-    // Fast unsafe write (caller must ensure space)
-    inline void writeRaw(const char* data, size_t len) {
+    void writeRaw(const char* data, size_t len) {
         std::memcpy(&buf[cursor], data, len);
         cursor += len;
     }
@@ -53,10 +32,8 @@ class JSONBuilder {
         need_comma = true;
     }
 
-    // Base implementation for const char*
-    void appendKey(const char* k) {
-        size_t len = std::strlen(k);
-        ensure(len + 4);  // quote + key + quote + colon
+    void appendKeyImpl(const char* k, size_t len) {
+        ensure(len + 4);
         if (need_comma) buf[cursor++] = ',';
         buf[cursor++] = '"';
         std::memcpy(&buf[cursor], k, len);
@@ -66,103 +43,69 @@ class JSONBuilder {
         need_comma = false;
     }
 
-    // Base implementation for std::string (avoids strlen)
-    void appendKey(const std::string& k) {
-        ensure(k.size() + 4);  // quote + key + quote + colon
-        if (need_comma) buf[cursor++] = ',';
-        buf[cursor++] = '"';
-        std::memcpy(&buf[cursor], k.data(), k.size());
-        cursor += k.size();
-        buf[cursor++] = '"';
-        buf[cursor++] = ':';
-        need_comma = false;
-    }
-
-    // Template for compile-time string literals (zero-cost)
-    template<size_t N>
-    void appendKey(const char (&k)[N]) {
-        ensure(N + 3);  // quote + (N-1) key + quote + colon = N+2, but +3 for potential comma
-        if (need_comma) buf[cursor++] = ',';
-        buf[cursor++] = '"';
-        std::memcpy(&buf[cursor], k, N - 1);  // N-1 excludes null terminator
-        cursor += N - 1;
-        buf[cursor++] = '"';
-        buf[cursor++] = ':';
-        need_comma = false;
-    }
-
-    // Chunk-based escaping (much faster than char-by-char)
     void escapeString(const char* s, size_t len) {
-        ensure(len * 2 + 2); // Reserve worst case
+        ensure(len * 2 + 2);
         buf[cursor++] = '"';
-        
+
         size_t start = 0;
         for (size_t i = 0; i < len; ++i) {
             unsigned char c = static_cast<unsigned char>(s[i]);
-            const char* replacement = nullptr;
-            size_t repl_len = 0;
-            
+            const char* repl = NULL;
+            size_t rlen = 2;
+
             switch (c) {
-                case '"':  replacement = "\\\""; repl_len = 2; break;
-                case '\\': replacement = "\\\\"; repl_len = 2; break;
-                case '\b': replacement = "\\b";  repl_len = 2; break;
-                case '\f': replacement = "\\f";  repl_len = 2; break;
-                case '\n': replacement = "\\n";  repl_len = 2; break;
-                case '\r': replacement = "\\r";  repl_len = 2; break;
-                case '\t': replacement = "\\t";  repl_len = 2; break;
+                case '"':  repl = "\\\""; break;
+                case '\\': repl = "\\\\"; break;
+                case '\b': repl = "\\b";  break;
+                case '\f': repl = "\\f";  break;
+                case '\n': repl = "\\n";  break;
+                case '\r': repl = "\\r";  break;
+                case '\t': repl = "\\t";  break;
                 default:
-                    // Skip other control characters (0x00-0x1F)
                     if (c < 0x20) {
                         if (i > start) {
-                            size_t chunk_len = i - start;
-                            std::memcpy(&buf[cursor], s + start, chunk_len);
-                            cursor += chunk_len;
+                            std::memcpy(&buf[cursor], s + start, i - start);
+                            cursor += i - start;
                         }
                         start = i + 1;
                     }
                     continue;
             }
 
-            // Flush safe chunk
             if (i > start) {
-                size_t chunk_len = i - start;
-                std::memcpy(&buf[cursor], s + start, chunk_len);
-                cursor += chunk_len;
+                std::memcpy(&buf[cursor], s + start, i - start);
+                cursor += i - start;
             }
-            
-            // Write replacement
-            std::memcpy(&buf[cursor], replacement, repl_len);
-            cursor += repl_len;
+            std::memcpy(&buf[cursor], repl, rlen);
+            cursor += rlen;
             start = i + 1;
         }
 
-        // Flush remaining safe chunk
         if (start < len) {
-            size_t chunk_len = len - start;
-            std::memcpy(&buf[cursor], s + start, chunk_len);
-            cursor += chunk_len;
+            std::memcpy(&buf[cursor], s + start, len - start);
+            cursor += len - start;
         }
-        
         buf[cursor++] = '"';
     }
 
-    // Custom itoa (integer to string)
     template<typename T>
     void writeInt(T value) {
         ensure(24);
-        if (value == 0) { buf[cursor++] = '0'; return; }
-        
+        if (value == 0) {
+            buf[cursor++] = '0';
+            return;
+        }
+
         typename std::make_unsigned<T>::type uval;
         if (value < 0) {
             buf[cursor++] = '-';
             uval = -static_cast<typename std::make_unsigned<T>::type>(value);
         } else {
-            uval = value;
+            uval = static_cast<typename std::make_unsigned<T>::type>(value);
         }
 
         char temp[24];
         char* p = temp + 23;
-        
         while (uval > 0) {
             *--p = '0' + (uval % 10);
             uval /= 10;
@@ -173,101 +116,703 @@ class JSONBuilder {
         cursor += len;
     }
 
-public:
-    JSONBuilder() : cursor(0), need_comma(false) { buf.resize(4096); }
-    
-    // Core structure
-    JSONBuilder& start() { ensure(1); buf[cursor++] = '{'; need_comma = false; return *this; }
-    JSONBuilder& end() { ensure(1); buf[cursor++] = '}'; need_comma = true; return *this; }
-    JSONBuilder& startArray() { ensure(1); buf[cursor++] = '['; need_comma = false; return *this; }
-    JSONBuilder& endArray() { ensure(1); buf[cursor++] = ']'; need_comma = true; return *this; }
+    void writeUInt(unsigned long long value) {
+        ensure(24);
+        if (value == 0) {
+            buf[cursor++] = '0';
+            return;
+        }
 
-    // Key handling (Optimized for literals)
-    JSONBuilder& key(const char* k) { appendKey(k); return *this; }
-    JSONBuilder& key(const std::string& k) { appendKey(k); return *this; }
+        char temp[24];
+        char* p = temp + 23;
+        while (value > 0) {
+            *--p = '0' + (value % 10);
+            value /= 10;
+        }
 
-    // Types
-    JSONBuilder& add(const char* k, int v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    JSONBuilder& add(const char* k, long v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    JSONBuilder& add(const char* k, long long v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    JSONBuilder& add(const char* k, unsigned int v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    JSONBuilder& add(const char* k, unsigned long v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    JSONBuilder& add(const char* k, unsigned long long v) { appendKey(k); writeInt(v); need_comma = true; return *this; }
-    
-    JSONBuilder& add(const char* k, bool v) {
-        appendKey(k);
-        if (v) { ensure(4); writeRaw("true", 4); } 
-        else   { ensure(5); writeRaw("false", 5); }
-        need_comma = true;
-        return *this;
+        size_t len = (temp + 23) - p;
+        std::memcpy(&buf[cursor], p, len);
+        cursor += len;
     }
 
-    JSONBuilder& add(const char* k, double v) {
-        appendKey(k);
+    void writeDouble(double v) {
         ensure(32);
         int len = std::snprintf(&buf[cursor], 32, "%.6g", v);
-        if(len > 0) cursor += len;
+        if (len > 0) cursor += len;
+    }
+
+    void writeBool(bool v) {
+        if (v) {
+            ensure(4);
+            writeRaw("true", 4);
+        } else {
+            ensure(5);
+            writeRaw("false", 5);
+        }
+    }
+
+    void writeNull() {
+        ensure(4);
+        writeRaw("null", 4);
+    }
+
+    // Type-dispatched value writing for templates
+    void writeValue(short v)              { writeInt(static_cast<int>(v)); }
+    void writeValue(int v)                { writeInt(v); }
+    void writeValue(long v)               { writeInt(v); }
+    void writeValue(long long v)          { writeInt(v); }
+    void writeValue(unsigned short v)     { writeUInt(v); }
+    void writeValue(unsigned int v)       { writeUInt(v); }
+    void writeValue(unsigned long v)      { writeUInt(v); }
+    void writeValue(unsigned long long v) { writeUInt(v); }
+    void writeValue(float v)              { writeDouble(static_cast<double>(v)); }
+    void writeValue(double v)             { writeDouble(v); }
+    void writeValue(bool v)               { writeBool(v); }
+
+public:
+    JSONBuilder() : cursor(0), need_comma(false) {
+        buf.resize(1024);
+    }
+
+    void clear() {
+        cursor = 0;
+        need_comma = false;
+    }
+
+    std::string str() const {
+        return std::string(buf.data(), cursor);
+    }
+
+    std::string take() {
+        buf.resize(cursor);
+        std::string result;
+        result.swap(buf);
+        cursor = 0;
+        need_comma = false;
+        buf.resize(1024);
+        return result;
+    }
+
+    size_t size() const { return cursor; }
+
+    // ==================== STRUCTURE ====================
+
+    JSONBuilder& start() {
+        comma();
+        ensure(1);
+        buf[cursor++] = '{';
+        need_comma = false;
+        return *this;
+    }
+
+    JSONBuilder& end() {
+        ensure(1);
+        buf[cursor++] = '}';
         need_comma = true;
         return *this;
     }
 
-    JSONBuilder& addNull(const char* k) {
-        appendKey(k);
-        ensure(4); writeRaw("null", 4);
+    JSONBuilder& startArray() {
+        comma();
+        ensure(1);
+        buf[cursor++] = '[';
+        need_comma = false;
+        return *this;
+    }
+
+    JSONBuilder& endArray() {
+        ensure(1);
+        buf[cursor++] = ']';
         need_comma = true;
         return *this;
     }
 
-    // Escaped String
-    JSONBuilder& addString(const char* k, const char* v) {
-        appendKey(k);
-        escapeString(v, std::strlen(v));
+    // ==================== KEY (runtime) ====================
+
+    JSONBuilder& key(const char* k) {
+        appendKeyImpl(k, std::strlen(k));
+        return *this;
+    }
+
+    JSONBuilder& key(const std::string& k) {
+        appendKeyImpl(k.data(), k.size());
+        return *this;
+    }
+
+    // ==================== LITERAL KEY: add ====================
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], short v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeInt(static_cast<int>(v));
         need_comma = true;
         return *this;
     }
-    
-    // Escaped String (std::string overload)
-    JSONBuilder& addString(const char* k, const std::string& v) {
-        appendKey(k);
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], int v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], long v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], long long v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], unsigned short v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], unsigned int v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], unsigned long v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], unsigned long long v) {
+        ensure(N + 27);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], float v) {
+        ensure(N + 35);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeDouble(static_cast<double>(v));
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], double v) {
+        ensure(N + 35);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeDouble(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& add(const char (&k)[N], bool v) {
+        ensure(N + 8);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeBool(v);
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addNull(const char (&k)[N]) {
+        ensure(N + 7);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        writeNull();
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addString(const char (&k)[N], const std::string& v) {
+        ensure(N + 3);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
         escapeString(v.data(), v.size());
         need_comma = true;
         return *this;
     }
 
-    // Safe String (no escaping, manual quotes)
-    JSONBuilder& addSafeString(const char* k, const char* v) {
-        appendKey(k);
-        size_t len = std::strlen(v);
-        ensure(len + 2);
+    template<size_t N>
+    JSONBuilder& addString(const char (&k)[N], const char* v) {
+        ensure(N + 3);
+        if (need_comma) buf[cursor++] = ',';
         buf[cursor++] = '"';
-        writeRaw(v, len);
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        escapeString(v, std::strlen(v));
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addSafe(const char (&k)[N], const std::string& v) {
+        ensure(N + v.size() + 5);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], v.data(), v.size());
+        cursor += v.size();
         buf[cursor++] = '"';
         need_comma = true;
         return *this;
     }
-    
-    JSONBuilder& addSafeString(const char* k, const std::string& v) {
-        appendKey(k);
+
+    template<size_t N, size_t M>
+    JSONBuilder& addSafe(const char (&k)[N], const char (&v)[M]) {
+        ensure(N + M + 4);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], v, M - 1);
+        cursor += M - 1;
+        buf[cursor++] = '"';
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addRaw(const char (&k)[N], const std::string& v) {
+        ensure(N + v.size() + 3);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        std::memcpy(&buf[cursor], v.data(), v.size());
+        cursor += v.size();
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addStringOrNull(const char (&k)[N], const std::string& val) {
+        ensure(N + 3);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        if (val.empty()) {
+            writeNull();
+        } else {
+            escapeString(val.data(), val.size());
+        }
+        need_comma = true;
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addStringOrNull(const char (&k)[N], const char* val) {
+        ensure(N + 3);
+        if (need_comma) buf[cursor++] = ',';
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], k, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        buf[cursor++] = ':';
+        if (val == NULL || val[0] == '\0') {
+            writeNull();
+        } else {
+            escapeString(val, std::strlen(val));
+        }
+        need_comma = true;
+        return *this;
+    }
+
+    // ==================== LITERAL KEY: addIf ====================
+
+    template<size_t N, typename T>
+    JSONBuilder& addIf(bool condition, const char (&k)[N], T val) {
+        if (condition) return add(k, val);
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& addStringIf(bool condition, const char (&k)[N], const std::string& val) {
+        if (condition) return addString(k, val);
+        return *this;
+    }
+
+    // ==================== RUNTIME KEY ====================
+
+    JSONBuilder& add(const char* k, short v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeInt(static_cast<int>(v));
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, int v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, long v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, long long v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, unsigned short v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, unsigned int v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, unsigned long v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, unsigned long long v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeUInt(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, float v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeDouble(static_cast<double>(v));
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, double v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeDouble(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& add(const char* k, bool v) {
+        appendKeyImpl(k, std::strlen(k));
+        writeBool(v);
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& addRaw(const char* k, const std::string& v) {
+        appendKeyImpl(k, std::strlen(k));
+        ensure(v.size());
+        writeRaw(v.data(), v.size());
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& addString(const char* k, const std::string& v) {
+        appendKeyImpl(k, std::strlen(k));
+        escapeString(v.data(), v.size());
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& addString(const char* k, const char* v) {
+        appendKeyImpl(k, std::strlen(k));
+        escapeString(v, std::strlen(v));
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& addNull(const char* k) {
+        appendKeyImpl(k, std::strlen(k));
+        writeNull();
+        need_comma = true;
+        return *this;
+    }
+
+    template<typename T>
+    JSONBuilder& addOrNull(const char* k, T val, T undefined) {
+        appendKeyImpl(k, std::strlen(k));
+        if (val == undefined) {
+            writeNull();
+        } else {
+            writeValue(val);
+        }
+        need_comma = true;
+        return *this;
+    }
+
+    JSONBuilder& addStringOrNull(const char* k, const std::string& val) {
+        appendKeyImpl(k, std::strlen(k));
+        if (val.empty()) {
+            writeNull();
+        } else {
+            escapeString(val.data(), val.size());
+        }
+        need_comma = true;
+        return *this;
+    }
+
+    // ==================== ARRAY VALUES ====================
+
+    JSONBuilder& value(short v) {
+        comma();
+        writeInt(static_cast<int>(v));
+        return *this;
+    }
+
+    JSONBuilder& value(int v) {
+        comma();
+        writeInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(long v) {
+        comma();
+        writeInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(long long v) {
+        comma();
+        writeInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(unsigned short v) {
+        comma();
+        writeUInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(unsigned int v) {
+        comma();
+        writeUInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(unsigned long v) {
+        comma();
+        writeUInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(unsigned long long v) {
+        comma();
+        writeUInt(v);
+        return *this;
+    }
+
+    JSONBuilder& value(float v) {
+        comma();
+        writeDouble(static_cast<double>(v));
+        return *this;
+    }
+
+    JSONBuilder& value(double v) {
+        comma();
+        writeDouble(v);
+        return *this;
+    }
+
+    JSONBuilder& value(bool v) {
+        comma();
+        writeBool(v);
+        return *this;
+    }
+
+    JSONBuilder& value(const std::string& v) {
+        comma();
+        escapeString(v.data(), v.size());
+        return *this;
+    }
+
+    JSONBuilder& value(const char* v) {
+        comma();
+        escapeString(v, std::strlen(v));
+        return *this;
+    }
+
+    JSONBuilder& valueRaw(const std::string& v) {
+        comma();
+        ensure(v.size());
+        writeRaw(v.data(), v.size());
+        return *this;
+    }
+
+    JSONBuilder& valueNull() {
+        comma();
+        writeNull();
+        return *this;
+    }
+
+    template<size_t N>
+    JSONBuilder& valueSafe(const char (&v)[N]) {
+        comma();
+        ensure(N + 1);
+        buf[cursor++] = '"';
+        std::memcpy(&buf[cursor], v, N - 1);
+        cursor += N - 1;
+        buf[cursor++] = '"';
+        return *this;
+    }
+
+    JSONBuilder& valueSafe(const std::string& v) {
+        comma();
         ensure(v.size() + 2);
         buf[cursor++] = '"';
-        writeRaw(v.data(), v.size());
+        std::memcpy(&buf[cursor], v.data(), v.size());
+        cursor += v.size();
         buf[cursor++] = '"';
-        need_comma = true;
         return *this;
     }
 
-    // Value helpers (for arrays)
-    JSONBuilder& value(int v) { comma(); writeInt(v); return *this; }
-    JSONBuilder& value(const std::string& v) { comma(); escapeString(v.data(), v.size()); return *this; }
-    JSONBuilder& valueRaw(const std::string& v) { comma(); ensure(v.size()); writeRaw(v.data(), v.size()); return *this; }
+    // ==================== ARRAY: valueOrNull ====================
 
-    // Output
-    std::string str() {
-        buf.resize(cursor);
-        return buf;
+    template<typename T>
+    JSONBuilder& valueOrNull(T val, T undefined) {
+        comma();
+        if (val == undefined) {
+            writeNull();
+        } else {
+            writeValue(val);
+        }
+        return *this;
     }
-    
-    void clear() { cursor = 0; need_comma = false; }
+
+    JSONBuilder& valueStringOrNull(const std::string& val) {
+        comma();
+        if (val.empty()) {
+            writeNull();
+        } else {
+            escapeString(val.data(), val.size());
+        }
+        return *this;
+    }
+
+    JSONBuilder& valueStringOrNull(const char* val) {
+        comma();
+        if (val == NULL || val[0] == '\0') {
+            writeNull();
+        } else {
+            escapeString(val, std::strlen(val));
+        }
+        return *this;
+    }
 };
 
 } // namespace JSON
